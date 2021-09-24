@@ -8,10 +8,10 @@ use std::sync::{
 
 use anyhow::Result;
 use crossbeam::sync::WaitGroup;
-use thiserror::Error;
 
-use log::{debug, error, trace};
+use log::{debug, trace};
 
+use crate::bitmap::Bitmap;
 use crate::bitwise_spinlock::Bitlock;
 use crate::mmap_wrapers;
 use crate::once_await::OnceAwait;
@@ -28,6 +28,8 @@ pub static PAGE_SIZE: SyncLazy<usize> = SyncLazy::new(|| {
     assert!(page_size > 0);
     page_size as usize
 });
+
+pub type UfoPopulateFn = dyn Fn(usize, usize, *mut u8) -> Result<(), UfoErr> + Sync + Send;
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Copy, Clone, Hash)]
 #[repr(C)]
@@ -207,7 +209,13 @@ impl UfoOffset {
         self.absolute_offset_bytes
     }
 
+    /// Offset from the first address after the header
+    #[deprecated = "use body_offset"]
     pub fn offset_from_header(&self) -> usize {
+        self.absolute_offset_bytes - self.header_bytes
+    }
+
+    pub fn body_offset(&self) -> usize {
         self.absolute_offset_bytes - self.header_bytes
     }
 
@@ -216,11 +224,11 @@ impl UfoOffset {
     }
 
     pub fn as_index_floor(&self) -> usize {
-        self.offset_from_header().div_floor(self.stride)
+        self.body_offset().div_floor(self.stride)
     }
 
     pub fn down_to_nearest_n_relative_to_header(&self, nearest: usize) -> UfoOffset {
-        let offset = self.offset_from_header();
+        let offset = self.body_offset();
         let offset = down_to_nearest(offset, nearest);
 
         let absolute_offset_bytes = self.header_bytes + offset;
@@ -420,13 +428,6 @@ impl UfoChunk {
     }
 }
 
-#[derive(Error, Debug)]
-#[error("Internal Ufo Error when populating")]
-pub struct UfoPopulateError;
-
-pub type UfoPopulateFn =
-    dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
-
 pub(crate) struct UfoFileWriteback {
     ufo_id: UfoId,
     mmap: MmapFd,
@@ -566,7 +567,7 @@ impl UfoFileWriteback {
         }
     }
 
-    pub fn reset(&self) -> Result<()> {
+    pub fn reset(&self) -> Result<(), UfoErr> {
         let ptr = self.mmap.as_ptr();
         unsafe {
             check_return_zero(libc::madvise(
@@ -586,6 +587,7 @@ pub struct UfoObject {
     pub config: UfoObjectConfig,
     pub mmap: BaseMmap,
     pub(crate) writeback_util: UfoFileWriteback,
+    pub(crate) loaded_chunks: RwLock<Bitmap>,
 }
 
 impl std::cmp::PartialEq for UfoObject {
@@ -597,7 +599,7 @@ impl std::cmp::PartialEq for UfoObject {
 impl std::cmp::Eq for UfoObject {}
 
 impl UfoObject {
-    pub(crate) fn reset_internal(&mut self) -> anyhow::Result<()> {
+    pub(crate) fn reset_internal(&mut self) -> Result<(), UfoErr> {
         let length = self.config.true_size - self.config.header_size_with_padding;
         unsafe {
             check_return_zero(libc::madvise(
@@ -628,29 +630,13 @@ impl UfoObject {
         }
     }
 
-    pub fn reset(&mut self) -> Result<WaitGroup, UfoLookupErr> {
+    pub fn reset(&mut self) -> Result<(), UfoErr> {
         let wait_group = crossbeam::sync::WaitGroup::new();
         let core = match self.core.upgrade() {
-            None => return Err(UfoLookupErr::CoreShutdown),
+            None => return Err(UfoErr::CoreShutdown),
             Some(x) => x,
         };
 
-        core.msg_send
-            .send(UfoInstanceMsg::Reset(wait_group.clone(), self.id))?;
-
-        Ok(wait_group)
-    }
-
-    pub fn free(&mut self) -> Result<WaitGroup, UfoLookupErr> {
-        let wait_group = crossbeam::sync::WaitGroup::new();
-        let core = match self.core.upgrade() {
-            None => return Err(UfoLookupErr::CoreShutdown),
-            Some(x) => x,
-        };
-
-        core.msg_send
-            .send(UfoInstanceMsg::Free(wait_group.clone(), self.id))?;
-
-        Ok(wait_group)
+        core.reset_impl(self.id)
     }
 }

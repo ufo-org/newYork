@@ -7,6 +7,7 @@
     int_roundings
 )]
 
+mod bitmap;
 mod bitwise_spinlock;
 mod errors;
 mod math;
