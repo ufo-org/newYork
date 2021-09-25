@@ -4,7 +4,8 @@
     slice_ptr_get,
     mutex_unlock,
     thread_id_value,
-    int_roundings
+    int_roundings,
+    negative_impls,
 )]
 
 mod bitmap;
@@ -13,12 +14,14 @@ mod errors;
 mod math;
 mod mmap_wrapers;
 mod once_await;
-mod populate_workers;
 mod return_checks;
 mod ufo_core;
 mod ufo_objects;
 mod write_buffer;
 
-pub use errors::*;
-pub use ufo_core::*;
 pub use ufo_objects::*;
+
+mod c_interface;
+
+pub use c_interface::core::*;
+pub use c_interface::object::*;

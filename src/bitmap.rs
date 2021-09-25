@@ -56,30 +56,4 @@ impl Bitmap {
 
         Ok(old)
     }
-
-    pub fn operate<F>(&mut self, addr: usize, f: F) -> Result<bool, AddressOutOfRange>
-    where
-        F: FnOnce(bool) -> bool,
-    {
-        if addr >= self.size {
-            return Err(AddressOutOfRange(addr));
-        }
-
-        let byte = addr >> 3;
-        let bit = addr & 0b111;
-
-        let b = self.map[byte];
-        let old = 1 == ((b >> bit) & 1);
-
-        let the_bit = 1 << bit;
-        let value = f(old);
-
-        if value {
-            self.map[byte] = b | the_bit;
-        } else {
-            self.map[byte] = b & !the_bit;
-        }
-
-        Ok(value)
-    }
 }

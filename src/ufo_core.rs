@@ -1,6 +1,6 @@
 use std::result::Result;
 use std::sync::{Arc, Mutex, RwLock};
-use std::{cmp::min, ops::Range, vec::Vec};
+use std::{cmp::min, vec::Vec};
 use std::{
     collections::{HashMap, VecDeque},
     sync::MutexGuard,
@@ -8,7 +8,6 @@ use std::{
 
 use log::{debug, info, trace};
 
-use crossbeam::sync::WaitGroup;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::bitmap::Bitmap;
@@ -18,13 +17,6 @@ use super::errors::*;
 use super::mmap_wrapers::*;
 use super::ufo_objects::*;
 use super::write_buffer::*;
-
-pub enum UfoInstanceMsg {
-    Shutdown(WaitGroup),
-    Allocate(promissory::Fulfiller<WrappedUfoObject>, UfoObjectConfig),
-    Reset(WaitGroup, UfoId),
-    Free(WaitGroup, UfoId),
-}
 
 struct UfoChunks {
     loaded_chunks: VecDeque<UfoChunk>,
@@ -183,10 +175,6 @@ impl UfoCore {
             let mmap_ptr = mmap.as_ptr();
             let true_size = config.true_size;
             let mmap_base = mmap_ptr as usize;
-            let segment = Range {
-                start: mmap_base,
-                end: mmap_base + true_size,
-            };
 
             debug!(target: "ufo_core", "mmapped {:#x} - {:#x}", mmap_base, mmap_base + true_size);
 
@@ -227,19 +215,9 @@ impl UfoCore {
         }
     }
 
-    pub fn get_ufo_by_id(&self, id: UfoId) -> Result<WrappedUfoObject, UfoErr> {
-        self.get_locked_state()
-            .map_err(|e| UfoErr::CoreBroken(format!("{:?}", e)))?
-            .objects_by_id
-            .get(&id)
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| Err(UfoErr::UfoNotFound))
-    }
-
     pub(crate) fn populate_impl(
         &self,
-        ufo_arc: Arc<RwLock<UfoObject>>,
+        ufo_arc: &WrappedUfoObject,
         fault_offset: UfoOffset,
     ) -> Result<(), UfoErr> {
         let ufo = ufo_arc.read().unwrap();
@@ -342,54 +320,38 @@ impl UfoCore {
         Ok(())
     }
 
-    pub(crate) fn reset_impl(&self, ufo_id: UfoId) -> Result<(), UfoErr> {
-        {
-            let state = &mut *self.get_locked_state()?;
+    pub(crate) fn reset_impl(&self, ufo: &WrappedUfoObject) -> Result<(), UfoErr> {
+        let state = &mut *self.get_locked_state()?;
+        let mut ufo = ufo.write()?;
 
-            let ufo = &mut *(state
-                .objects_by_id
-                .get(&ufo_id)
-                .map(Ok)
-                .unwrap_or_else(|| Err(UfoErr::UfoNotFound))?
-                .write()?);
+        debug!(target: "ufo_core", "resetting {:?}", ufo.id);
+        ufo.reset_internal()?;
 
-            debug!(target: "ufo_core", "resetting {:?}", ufo.id);
-
-            ufo.reset_internal()?;
-
-            state.loaded_chunks.drop_ufo_chunks(ufo_id);
-        }
+        state.loaded_chunks.drop_ufo_chunks(ufo.id);
 
         // this.assert_segment_map();
 
         Ok(())
     }
 
-    pub(crate) fn free(&self, ufo_id: UfoId) -> anyhow::Result<()> {
+    pub(crate) fn free(&self, ufo: &WrappedUfoObject) -> Result<(), UfoErr> {
         let state = &mut *self.get_locked_state()?;
-        let ufo = state
-            .objects_by_id
-            .remove(&ufo_id)
-            .map(Ok)
-            .unwrap_or_else(|| Err(anyhow::anyhow!("No such Ufo")))?;
-        let ufo = ufo
-            .write()
-            .map_err(|_| anyhow::anyhow!("Broken Ufo Lock"))?;
+        let ufo = ufo.write()?;
 
         debug!(target: "ufo_core", "freeing {:?} @ {:?}", ufo.id, ufo.mmap.as_ptr());
-        state.loaded_chunks.drop_ufo_chunks(ufo_id);
+        state.loaded_chunks.drop_ufo_chunks(ufo.id);
 
         Ok(())
     }
 
     pub fn shutdown(&self) {
         info!(target: "ufo_core", "shutting down");
-        let keys: Vec<UfoId> = {
+        let ufos: Vec<WrappedUfoObject> = {
             let state = &mut *self.get_locked_state().expect("err on shutdown");
-            state.objects_by_id.keys().cloned().collect()
+            state.objects_by_id.values().cloned().collect()
         };
 
-        keys.iter()
-            .for_each(|k| self.free(*k).expect("err on free"));
+        ufos.iter()
+            .for_each(|k| self.free(k).expect("err on free"));
     }
 }

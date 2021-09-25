@@ -2,20 +2,26 @@ use thiserror::Error;
 
 use crate::bitmap::AddressOutOfRange;
 
+pub struct UfoPopulateError;
+
 #[derive(Error, Debug)]
 pub enum UfoErr {
-    #[error("Core shutdown")]
-    CoreShutdown,
     #[error("Core non functional, {0}")]
     CoreBroken(String),
     #[error("Ufo Lock is broken")]
     UfoLockBroken,
-    #[error("Ufo not found")]
-    UfoNotFound,
     #[error("Ufo address error, internal math wrong?")]
     UfoAddressError,
     #[error("IO Error")]
     UfoIoError,
+    #[error("Error during populate")]
+    UfoPopulateError,
+}
+
+impl From<UfoPopulateError> for UfoErr {
+    fn from(_: UfoPopulateError) -> Self {
+        UfoErr::UfoPopulateError
+    }
 }
 
 impl From<UfoAllocateErr> for UfoErr {

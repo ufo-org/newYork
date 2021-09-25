@@ -7,7 +7,6 @@ use std::sync::{
 };
 
 use anyhow::Result;
-use crossbeam::sync::WaitGroup;
 
 use log::{debug, trace};
 
@@ -29,7 +28,7 @@ pub static PAGE_SIZE: SyncLazy<usize> = SyncLazy::new(|| {
     page_size as usize
 });
 
-pub type UfoPopulateFn = dyn Fn(usize, usize, *mut u8) -> Result<(), UfoErr> + Sync + Send;
+pub type UfoPopulateFn = dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Copy, Clone, Hash)]
 #[repr(C)]
@@ -92,6 +91,7 @@ pub struct UfoObjectParams {
     pub read_only: bool,
     pub populate: Box<UfoPopulateFn>,
     pub element_ct: usize,
+    pub associated_data: *mut libc::c_void,
 }
 
 impl UfoObjectParams {
@@ -101,17 +101,21 @@ impl UfoObjectParams {
 }
 
 pub struct UfoObjectConfig {
-    pub(crate) populate: Box<UfoPopulateFn>,
+    pub populate: Box<UfoPopulateFn>,
 
-    pub(crate) header_size_with_padding: usize,
-    pub(crate) header_size: usize,
+    pub header_size_with_padding: usize,
+    pub header_size: usize,
 
-    pub(crate) stride: usize,
-    pub(crate) elements_loaded_at_once: usize,
-    pub(crate) element_ct: usize,
-    pub(crate) true_size: usize,
-    pub(crate) read_only: bool,
+    pub stride: usize,
+    pub elements_loaded_at_once: usize,
+    pub element_ct: usize,
+    pub true_size: usize,
+    pub read_only: bool,
+    pub associated_data: *mut libc::c_void,
 }
+
+unsafe impl Send for UfoObjectConfig { }
+unsafe impl Sync for UfoObjectConfig { }
 
 // Getters
 impl UfoObjectConfig {
@@ -129,6 +133,9 @@ impl UfoObjectConfig {
     }
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+    pub fn associated_data(&self) -> *mut libc::c_void {
+        self.associated_data
     }
 }
 
@@ -159,6 +166,7 @@ impl UfoObjectConfig {
             element_ct: params.element_ct,
 
             populate: params.populate,
+            associated_data: params.associated_data,
         }
     }
 
@@ -207,12 +215,6 @@ impl UfoOffset {
 
     pub fn absolute_offset(&self) -> usize {
         self.absolute_offset_bytes
-    }
-
-    /// Offset from the first address after the header
-    #[deprecated = "use body_offset"]
-    pub fn offset_from_header(&self) -> usize {
-        self.absolute_offset_bytes - self.header_bytes
     }
 
     pub fn body_offset(&self) -> usize {
@@ -507,7 +509,7 @@ impl UfoFileWriteback {
     }
 
     pub(self) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<()> {
-        let off_head = offset.offset_from_header();
+        let off_head = offset.body_offset();
         if off_head > self.body_bytes() {
             anyhow::bail!("{} outside of range", off_head);
         }
@@ -544,7 +546,7 @@ impl UfoFileWriteback {
     }
 
     pub fn try_readback<'a>(&'a self, offset: &UfoOffset) -> Option<&'a [u8]> {
-        let off_head = offset.offset_from_header();
+        let off_head = offset.body_offset();
         trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head);
 
         let chunk_number = off_head.div_floor(self.chunk_size);
@@ -590,6 +592,8 @@ pub struct UfoObject {
     pub(crate) loaded_chunks: RwLock<Bitmap>,
 }
 
+unsafe impl Send for UfoObject {}
+
 impl std::cmp::PartialEq for UfoObject {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -628,15 +632,5 @@ impl UfoObject {
                 .add(self.config.header_size_with_padding)
                 .cast()
         }
-    }
-
-    pub fn reset(&mut self) -> Result<(), UfoErr> {
-        let wait_group = crossbeam::sync::WaitGroup::new();
-        let core = match self.core.upgrade() {
-            None => return Err(UfoErr::CoreShutdown),
-            Some(x) => x,
-        };
-
-        core.reset_impl(self.id)
     }
 }
