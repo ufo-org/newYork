@@ -1,20 +1,18 @@
+use std::collections::HashMap;
 use std::io::Error;
 use std::lazy::SyncLazy;
 use std::num::NonZeroUsize;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
-    Arc, RwLock, RwLockReadGuard, Weak,
+    Arc, RwLock, Weak,
 };
 
 use anyhow::Result;
 
 use log::{debug, trace};
 
-use crate::bitmap::Bitmap;
 use crate::bitwise_spinlock::Bitlock;
 use crate::mmap_wrapers;
-use crate::once_await::OnceAwait;
-use crate::once_await::OnceFulfiller;
 
 use super::errors::*;
 use super::math::*;
@@ -28,7 +26,8 @@ pub static PAGE_SIZE: SyncLazy<usize> = SyncLazy::new(|| {
     page_size as usize
 });
 
-pub type UfoPopulateFn = dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
+pub type UfoPopulateFn =
+    dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Copy, Clone, Hash)]
 #[repr(C)]
@@ -88,7 +87,6 @@ pub struct UfoObjectParams {
     pub header_size: usize,
     pub stride: usize,
     pub min_load_ct: Option<usize>,
-    pub read_only: bool,
     pub populate: Box<UfoPopulateFn>,
     pub element_ct: usize,
     pub associated_data: *mut libc::c_void,
@@ -110,12 +108,11 @@ pub struct UfoObjectConfig {
     pub elements_loaded_at_once: usize,
     pub element_ct: usize,
     pub true_size: usize,
-    pub read_only: bool,
     pub associated_data: *mut libc::c_void,
 }
 
-unsafe impl Send for UfoObjectConfig { }
-unsafe impl Sync for UfoObjectConfig { }
+unsafe impl Send for UfoObjectConfig {}
+unsafe impl Sync for UfoObjectConfig {}
 
 // Getters
 impl UfoObjectConfig {
@@ -130,9 +127,6 @@ impl UfoObjectConfig {
     }
     pub fn element_ct(&self) -> usize {
         self.element_ct
-    }
-    pub fn read_only(&self) -> bool {
-        self.read_only
     }
     pub fn associated_data(&self) -> *mut libc::c_void {
         self.associated_data
@@ -157,7 +151,6 @@ impl UfoObjectConfig {
         UfoObjectConfig {
             header_size: params.header_size,
             stride: params.stride,
-            read_only: params.read_only,
 
             header_size_with_padding,
             true_size,
@@ -169,13 +162,9 @@ impl UfoObjectConfig {
             associated_data: params.associated_data,
         }
     }
-
-    pub(crate) fn should_try_writeback(&self) -> bool {
-        // this may get more complex in the future, for example we may implement ALWAYS writeback
-        !self.read_only
-    }
 }
 
+#[derive(Clone)]
 pub(crate) struct UfoOffset {
     base_addr: usize,
     chunk_number: usize,
@@ -257,68 +246,73 @@ impl std::fmt::Display for UfoOffset {
     }
 }
 
-pub(crate) struct ChunkFreer {
-    pivot: Option<BaseMmap>,
-}
+// pub(crate) struct ChunkFreer {
+//     pivot: Option<BaseMmap>,
+// }
 
-impl ChunkFreer {
-    pub fn new() -> Self {
-        ChunkFreer { pivot: None }
-    }
+// impl ChunkFreer {
+//     pub fn new() -> Self {
+//         ChunkFreer { pivot: None }
+//     }
 
-    fn ensure_capcity(&mut self, to_fit: &UfoChunk) -> Result<&BaseMmap> {
-        let required_size = to_fit.size_in_pages().size_as_multiple_of_pages();
-        trace!(target: "ufo_object", "ensuring pivot capacity {}", required_size);
-        if let None = self.pivot {
-            trace!(target: "ufo_object", "init pivot {}", required_size);
-            self.pivot = Some(BaseMmap::new(
-                required_size,
-                &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
-                &[MmapFlag::Anonymous, MmapFlag::Private],
-                None,
-            )?);
-        }
+//     fn ensure_capcity(&mut self, to_fit: &UfoChunk) -> Result<&BaseMmap> {
+//         let required_size = to_fit.size_in_pages().size_as_multiple_of_pages();
+//         trace!(target: "ufo_object", "ensuring pivot capacity {}", required_size);
+//         if let None = self.pivot {
+//             trace!(target: "ufo_object", "init pivot {}", required_size);
+//             self.pivot = Some(BaseMmap::new(
+//                 required_size,
+//                 &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
+//                 &[MmapFlag::Anonymous, MmapFlag::Private],
+//                 None,
+//             )?);
+//         }
 
-        let current_size = self.pivot.as_ref().expect("just checked").length();
-        if current_size < required_size {
-            trace!(target: "ufo_object", "grow pivot from {} to {}", current_size, required_size);
-            let mut old_pivot = None;
-            std::mem::swap(&mut old_pivot, &mut self.pivot);
-            let pivot = old_pivot.unwrap();
-            self.pivot = Some(pivot.resize(required_size)?);
-        }
+//         let current_size = self.pivot.as_ref().expect("just checked").length();
+//         if current_size < required_size {
+//             trace!(target: "ufo_object", "grow pivot from {} to {}", current_size, required_size);
+//             let mut old_pivot = None;
+//             std::mem::swap(&mut old_pivot, &mut self.pivot);
+//             let pivot = old_pivot.unwrap();
+//             self.pivot = Some(pivot.resize(required_size)?);
+//         }
 
-        Ok(&self.pivot.as_ref().expect("just checked"))
-    }
+//         Ok(&self.pivot.as_ref().expect("just checked"))
+//     }
 
-    pub fn free_chunk(&mut self, chunk: &mut UfoChunk) -> Result<usize> {
-        if 0 == chunk.size() {
-            return Ok(0);
-        }
-        chunk.free_and_writeback_dirty(self.ensure_capcity(chunk)?)
-    }
-}
+//     pub fn free_chunk(&mut self, chunk: &mut UfoChunk) -> Result<usize> {
+//         if 0 == chunk.size() {
+//             return Ok(0);
+//         }
+//         chunk.free_and_writeback_dirty(self.ensure_capcity(chunk)?)
+//     }
+// }
 
-pub(self) struct SizeInPages(usize);
+// pub(self) struct SizeInPages(usize);
 
-impl SizeInPages {
-    fn size_as_multiple_of_pages(&self) -> usize {
-        up_to_nearest(self.0, *PAGE_SIZE)
-    }
-}
+// impl SizeInPages {
+//     fn size_as_multiple_of_pages(&self) -> usize {
+//         up_to_nearest(self.0, *PAGE_SIZE)
+//     }
+// }
+
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
+pub(crate) struct UfoChunkIdx(pub usize);
 
 pub(crate) struct UfoChunk {
     ufo_id: UfoId,
     object: Weak<RwLock<UfoObject>>,
     offset: UfoOffset,
     length: Option<NonZeroUsize>,
-    hash: Arc<OnceAwait<Option<DataHash>>>,
+    pub(crate) dirty: bool,
 }
+
+pub(crate) type ChunkArcLock = Arc<RwLock<UfoChunk>>;
 
 impl UfoChunk {
     pub fn new(
         arc: &WrappedUfoObject,
-        object: &RwLockReadGuard<UfoObject>,
+        object: &UfoObject,
         offset: UfoOffset,
         length: usize,
     ) -> UfoChunk {
@@ -334,7 +328,7 @@ impl UfoChunk {
             object: Arc::downgrade(arc),
             offset,
             length: NonZeroUsize::new(length),
-            hash: Arc::new(OnceAwait::new()),
+            dirty: false,
         }
     }
 
@@ -342,91 +336,84 @@ impl UfoChunk {
         &self.offset
     }
 
-    pub fn hash_fulfiller(&self) -> impl OnceFulfiller<Option<DataHash>> {
-        self.hash.clone()
-    }
+    // pub(crate) fn offset_clone(this: &ChunkArcLock) -> UfoOffset {
+    //     this.read().unwrap().offset().clone()
+    // }
 
-    pub fn free_and_writeback_dirty(&mut self, pivot: &BaseMmap) -> Result<usize> {
+    pub fn free_and_writeback_dirty(&mut self) -> Result<usize> {
         match (self.length, self.object.upgrade()) {
             (Some(length), Some(obj)) => {
                 let length_bytes = length.get();
                 let obj = obj.read().unwrap();
+                let mut loaded_chunks = obj.loaded_chunks.write().unwrap();
 
                 trace!(target: "ufo_object", "free chunk {:?}@{} ({}b)",
-                    self.ufo_id, self.offset.absolute_offset() , length_bytes
+                self.ufo_id, self.offset.absolute_offset() , length_bytes
                 );
-
-                if !obj.config.should_try_writeback() {
-                    trace!(target: "ufo_object", "no writeback {:?}", self.ufo_id);
-                    // Not doing writebacks, punch it out and leave
-                    unsafe {
-                        let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
-                        check_return_zero(libc::madvise(
-                            data_ptr.cast(),
-                            length_bytes,
-                            libc::MADV_DONTNEED,
-                        ))?;
-                    }
-                    return Ok(length_bytes);
-                }
 
                 // We first remap the pages from the UFO into the file backing
                 // we check the value of the page after the remap because the remap
                 //  is atomic and will let us read cleanly in the face of racing writers
                 let chunk_number = self.offset.chunk_number();
                 trace!("try to uncontended-lock {:?}.{}", obj.id, self.offset());
-                let chunk_lock = obj
-                    .writeback_util
-                    .chunk_locks
-                    .lock_uncontended(chunk_number)?;
-                unsafe {
-                    let length_page_multiple = self.size_in_pages().size_as_multiple_of_pages();
-                    anyhow::ensure!(length_page_multiple <= pivot.length(), "Pivot too small");
-                    let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
-                    let pivot_ptr = pivot.as_ptr();
-                    check_ptr_nonneg(libc::mremap(
-                        data_ptr.cast(),
-                        length_page_multiple,
-                        length_page_multiple,
-                        libc::MREMAP_FIXED | libc::MREMAP_MAYMOVE | libc::MREMAP_DONTUNMAP,
-                        pivot_ptr,
-                    ))?;
-                    trace!(target: "ufo_object", "{:?} mremaped data to pivot", self.ufo_id);
-                }
+                // let chunk_lock = obj.writeback_util.chunk_locks.spinlock(chunk_number)?;
 
-                if let Some(hash) = self.hash.get() {
-                    let calculated_hash = pivot.with_slice(0, length_bytes, hash_function).unwrap(); // it should never be possible for this to fail
-                    trace!(target: "ufo_object", "writeback hash matches {}", hash == &calculated_hash);
-                    if hash != &calculated_hash {
-                        pivot.with_slice(0, length_bytes, |data| {
-                            obj.writeback_util.writeback(&self.offset, data)
-                        });
+                if self.dirty {
+                    unsafe {
+                        let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
+                        let data = std::slice::from_raw_parts(data_ptr, self.my_size());
+                        obj.writeback_util.writeback(&self.offset, data)?;
+
+                        check_return_zero(libc::madvise(
+                            data_ptr.cast(),
+                            length_bytes,
+                            libc::MADV_DONTNEED,
+                        ))?;
                     }
                 }
 
                 self.length = None;
+                loaded_chunks.remove(&UfoChunkIdx(chunk_number));
                 trace!("unlock free {:?}.{}", obj.id, self.offset());
-                chunk_lock.unlock();
+                // chunk_lock.unlock();
                 Ok(length_bytes)
             }
             _ => Ok(0),
         }
     }
 
+    // pub fn mark_freed(this: &ChunkArcLock) {
+    //     this.write().unwrap().length = None;
+    // }
+
+    // pub fn ufo_id(this: &ChunkArcLock) -> UfoId {
+    //     this.read().unwrap().ufo_id
+    // }
+
+    // pub fn size(this: &ChunkArcLock) -> usize {
+    //     this.read()
+    //         .unwrap()
+    //         .length
+    //         .map(NonZeroUsize::get)
+    //         .unwrap_or(0)
+    // }
+
     pub fn mark_freed(&mut self) {
         self.length = None;
     }
 
-    pub fn ufo_id(&self) -> UfoId {
+    pub fn ufo_id(&self ) -> UfoId {
         self.ufo_id
     }
 
     pub fn size(&self) -> usize {
-        self.length.map(NonZeroUsize::get).unwrap_or(0)
+        self.length
+            .map(NonZeroUsize::get)
+            .unwrap_or(0)
     }
 
-    pub(self) fn size_in_pages(&self) -> SizeInPages {
-        SizeInPages(self.size())
+    fn my_size(&self) -> usize {
+        self.length.map(NonZeroUsize::get).unwrap_or(0)
     }
 }
 
@@ -434,11 +421,9 @@ pub(crate) struct UfoFileWriteback {
     ufo_id: UfoId,
     mmap: MmapFd,
     chunk_ct: usize,
-    pub(crate) chunk_locks: Bitlock,
     chunk_size: usize,
     total_bytes: usize,
     header_bytes: usize,
-    // bitlock_bytes: usize,
     // bitmap_bytes: usize,
 }
 
@@ -491,13 +476,13 @@ impl UfoFileWriteback {
             0,
         )?;
 
-        let chunk_locks = Bitlock::new(unsafe { mmap.as_ptr().add(bitmap_bytes) }, chunk_ct);
+        // let chunk_locks = Bitlock::new(unsafe { mmap.as_ptr().add(bitmap_bytes) }, chunk_ct);
 
         Ok(UfoFileWriteback {
             ufo_id,
             chunk_ct,
             chunk_size,
-            chunk_locks,
+            // chunk_locks,
             mmap,
             total_bytes,
             header_bytes: bitmap_bytes + bitlock_bytes,
@@ -589,7 +574,7 @@ pub struct UfoObject {
     pub config: UfoObjectConfig,
     pub mmap: BaseMmap,
     pub(crate) writeback_util: UfoFileWriteback,
-    pub(crate) loaded_chunks: RwLock<Bitmap>,
+    pub(crate) loaded_chunks: RwLock<HashMap<UfoChunkIdx, ChunkArcLock>>,
 }
 
 unsafe impl Send for UfoObject {}
@@ -616,6 +601,7 @@ impl UfoObject {
             ))?;
         }
         self.writeback_util.reset()?;
+        self.loaded_chunks.write().unwrap().clear();
 
         Ok(())
     }

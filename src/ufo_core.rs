@@ -10,16 +10,13 @@ use log::{debug, info, trace};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-use crate::bitmap::Bitmap;
-use crate::once_await::OnceFulfiller;
-
 use super::errors::*;
 use super::mmap_wrapers::*;
 use super::ufo_objects::*;
 use super::write_buffer::*;
 
 struct UfoChunks {
-    loaded_chunks: VecDeque<UfoChunk>,
+    loaded_chunks: VecDeque<Arc<RwLock<UfoChunk>>>,
     used_memory: usize,
     config: Arc<UfoCoreConfig>,
 }
@@ -33,8 +30,8 @@ impl UfoChunks {
         }
     }
 
-    fn add(&mut self, chunk: UfoChunk) {
-        self.used_memory += chunk.size();
+    fn add(&mut self, chunk: ChunkArcLock, size: usize) {
+        self.used_memory += size;
         self.loaded_chunks.push_back(chunk);
     }
 
@@ -42,9 +39,12 @@ impl UfoChunks {
         let chunks = &mut self.loaded_chunks;
         chunks
             .iter_mut()
+            .map(|c| c.write().expect("chunk lock broken"))
             .filter(|c| c.ufo_id() == ufo_id)
-            .for_each(UfoChunk::mark_freed);
-        self.used_memory = chunks.iter().map(UfoChunk::size).sum();
+            .for_each(|mut c| c.mark_freed());
+        self.used_memory = chunks.iter()
+            .map(|c| c.read().expect("chunk lock broken"))
+            .map(|c| c.size()).sum();
     }
 
     fn free_until_low_water_mark(&mut self) -> anyhow::Result<usize> {
@@ -58,7 +58,7 @@ impl UfoChunks {
             match self.loaded_chunks.pop_front() {
                 None => anyhow::bail!("nothing to free"),
                 Some(chunk) => {
-                    let size = chunk.size(); // chunk.free_and_writeback_dirty()?;
+                    let size = chunk.read().unwrap().size(); // chunk.free_and_writeback_dirty()?;
                     will_free_bytes += size;
                     to_free.push(chunk);
                     // self.used_memory -= size;
@@ -68,7 +68,7 @@ impl UfoChunks {
 
         let freed_memory = to_free
             .into_par_iter()
-            .map_init(ChunkFreer::new, |f, mut c| f.free_chunk(&mut c))
+            .map(|mut c| c.write().unwrap().free_and_writeback_dirty())
             .reduce(|| Ok(0), |a, b| Ok(a? + b?))?;
 
         debug!(target: "ufo_core", "Done freeing memory");
@@ -187,16 +187,16 @@ impl UfoCore {
 
             // let header_offset = config.header_size_with_padding - config.header_size;
             // let body_offset = config.header_size_with_padding;
-            let chunk_ct = config
-                .element_ct()
-                .div_ceil(config.elements_loaded_at_once());
+            // let chunk_ct = config
+            //     .element_ct()
+            //     .div_ceil(config.elements_loaded_at_once());
             let ufo = UfoObject {
                 id,
                 core: Arc::downgrade(this),
                 config,
                 mmap,
                 writeback_util: writeback,
-                loaded_chunks: RwLock::new(Bitmap::new(chunk_ct)),
+                loaded_chunks: RwLock::new(HashMap::new()),
             };
 
             let ufo = Arc::new(RwLock::new(ufo));
@@ -218,15 +218,15 @@ impl UfoCore {
     pub(crate) fn populate_impl(
         &self,
         ufo_arc: &WrappedUfoObject,
+        ufo: &UfoObject,
         fault_offset: UfoOffset,
-    ) -> Result<(), UfoErr> {
-        let ufo = ufo_arc.read().unwrap();
-        if ufo
+    ) -> Result<ChunkArcLock, UfoErr> {
+        if let Some(chunk) = ufo
             .loaded_chunks
             .read()?
-            .test(fault_offset.chunk_number())?
+            .get(&UfoChunkIdx(fault_offset.chunk_number()))
         {
-            return Ok(());
+            return Ok(Arc::clone(chunk));
         }
 
         let mut state = self.get_locked_state().unwrap();
@@ -253,28 +253,38 @@ impl UfoCore {
         // drop the lock before loading so that UFOs can be recursive
         Mutex::unlock(state);
 
-        let chunk = UfoChunk::new(&ufo_arc, &ufo, populate_offset, populate_size);
+        let chunk = Arc::new(RwLock::new(UfoChunk::new(
+            &ufo_arc,
+            &ufo,
+            populate_offset,
+            populate_size,
+        )));
+        // grab the lock AFTER releasing the core lock
+        let chunk_lock = chunk.read().unwrap();
+
+
         let config = &ufo.config;
-        trace!("spin locking {:?}.{}", ufo.id, chunk.offset());
-        let chunk_lock = ufo // grab the lock AFTER releasing the core lock
-            .writeback_util
-            .chunk_locks
-            .spinlock(chunk.offset().chunk_number())
-            .map_err(|_| UfoErr::UfoLockBroken)?;
+        let offset = chunk_lock.offset();
+        trace!("spin locking {:?}.{}", ufo.id, offset);
 
-        let chunk_loaded = ufo
-            .loaded_chunks
-            .write()?
-            .set(chunk.offset().as_index_floor(), true)?;
-        if chunk_loaded {
+        let mut loaded_chunks = ufo.loaded_chunks.write()?;
+        let insert_result = loaded_chunks
+            .try_insert(UfoChunkIdx(offset.as_index_floor()), Arc::clone(&chunk));
+        if let Err(occ) = insert_result {
             // Someone was racing with us to load it
-            return Ok(());
+            return Ok(Arc::clone(occ.entry.get()));
         }
+        
+        // just checked, not an error
+        let chunk = Arc::clone(unsafe { insert_result.unwrap_unchecked() });
+        std::mem::drop(loaded_chunks); // drop the lock early
 
+        //TODO: write directly into the UFO
+        //TODO: actually check that the chunk isn't unloaded
         let mut buffer = UfoWriteBuffer::new();
         let raw_data = ufo
             .writeback_util
-            .try_readback(&chunk.offset())
+            .try_readback(&offset)
             .map(Ok::<&[u8], UfoErr>)
             .unwrap_or_else(|| {
                 trace!(target: "ufo_core", "calculate");
@@ -289,35 +299,21 @@ impl UfoCore {
 
         let chunk_slice = unsafe {
             std::slice::from_raw_parts_mut(
-                ufo.body_ptr().add(chunk.offset().body_offset()).cast(),
-                chunk.size(),
+                ufo.body_ptr().add(offset.body_offset()).cast(),
+                chunk_lock.size(),
             )
         };
         chunk_slice.copy_from_slice(raw_data);
         trace!(target: "ufo_core", "populated");
 
-        let hash_fulfiller = chunk.hash_fulfiller();
-
         let mut state = self.get_locked_state().unwrap();
 
-        trace!("unlock populate {:?}.{}", ufo.id, chunk.offset());
-        chunk_lock.unlock(); // release only after we acquired the state lock
+        trace!("unlock populate {:?}.{}", ufo.id, offset);
 
-        state.loaded_chunks.add(chunk);
+        state.loaded_chunks.add(Arc::clone(&chunk), chunk_lock.size()); //TODO: need to hand out Arcs
         trace!(target: "ufo_core", "chunk saved");
 
-        // release the lock before calculating the hash so other workers can proceed
-        Mutex::unlock(state);
-
-        if !config.should_try_writeback() {
-            hash_fulfiller.try_init(None);
-        } else {
-            // Make sure to take a slice of the raw data. the kernel operates in page sized chunks but the UFO ends where it ends
-            let calculated_hash = hash_function(&raw_data[0..populate_size]);
-            hash_fulfiller.try_init(Some(calculated_hash));
-        }
-
-        Ok(())
+        Ok(chunk)
     }
 
     pub(crate) fn reset_impl(&self, ufo: &WrappedUfoObject) -> Result<(), UfoErr> {
@@ -351,7 +347,6 @@ impl UfoCore {
             state.objects_by_id.values().cloned().collect()
         };
 
-        ufos.iter()
-            .for_each(|k| self.free(k).expect("err on free"));
+        ufos.iter().for_each(|k| self.free(k).expect("err on free"));
     }
 }

@@ -6,6 +6,8 @@
     thread_id_value,
     int_roundings,
     negative_impls,
+    map_try_insert,
+    option_result_unwrap_unchecked
 )]
 
 mod bitmap;

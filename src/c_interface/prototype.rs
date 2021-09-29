@@ -8,7 +8,6 @@ pub struct BoroughParameters {
     pub element_size: usize,
     pub element_ct: usize,
     pub min_load_ct: usize,
-    pub read_only: bool,
     pub populate_data: BoroughPopulateData,
     pub populate_fn: BoroughPopulateCallout,
 }

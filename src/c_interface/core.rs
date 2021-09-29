@@ -1,15 +1,13 @@
-
-
 use libc::c_void;
 use std::sync::Arc;
 
+use crate::errors::*;
 use crate::ufo_core;
 use crate::ufo_core::*;
 use crate::ufo_objects::*;
-use crate::errors::*;
 
-use super::prototype::*;
 use super::object::*;
+use super::prototype::*;
 
 #[repr(C)]
 pub struct NycCore {
@@ -78,13 +76,12 @@ impl NycCore {
 
             let assoc_dat:Box<(BoroughPopulateCallout, BoroughPopulateData)>  // /
                 = Box::new((prototype.populate_fn, prototype.populate_data));
-             
+
             let params = UfoObjectParams {
                 header_size: prototype.header_size,
                 stride: prototype.element_size,
                 element_ct: prototype.element_ct,
                 min_load_ct: Some(prototype.min_load_ct).filter(|x| *x > 0),
-                read_only: prototype.read_only,
                 populate: Box::new(populate),
                 associated_data: Box::into_raw(assoc_dat).cast(),
             };
@@ -93,9 +90,7 @@ impl NycCore {
                 .and_then(move |core| {
                     let ufo = ufo_core::UfoCore::allocate_ufo(core, params.new_config());
                     match ufo {
-                        Ok(ufo) => {
-                            Some(Borough::wrap(ufo))
-                        }
+                        Ok(ufo) => Some(Borough::wrap(ufo)),
                         _ => None,
                     }
                 })
