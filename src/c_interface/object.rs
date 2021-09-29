@@ -1,3 +1,7 @@
+use std::sync::LockResult;
+use std::sync::RwLock;
+use std::sync::RwLockWriteGuard;
+
 use libc::c_void;
 use libc::memcpy;
 
@@ -94,18 +98,20 @@ impl Borough {
             let ptr: *const libc::c_void = unsafe { ufo_lock.body_ptr().add(idx * stride) };
             let offset = UfoOffset::from_addr(&*ufo_lock, ptr);
 
-            let chunk = core.populate_impl(ufo, &*ufo_lock, offset)
-                .expect("error during populate");
-            let _chunk = chunk
-                .read()
-                .expect("chunk lock broken");
-
-            unsafe { memcpy(writeout, ptr, stride) };
+            core.populate_impl(ufo, &*ufo_lock, offset,
+                |l| l.read().unwrap(),
+                |_chunk| {
+                    unsafe { memcpy(writeout, ptr, stride) };
+                }).expect("error during read");
 
             Some(0)
         })
         .unwrap_or(None)
         .unwrap_or(-1)
+    }
+
+    fn wlock<'a>(l: &'a ChunkArcLock) -> RwLockWriteGuard<'a, UfoChunk>{
+        l.write().unwrap()
     }
 
     #[no_mangle]
@@ -123,15 +129,12 @@ impl Borough {
             let ptr = unsafe { ufo_lock.body_ptr().add(idx * stride) };
             let offset = UfoOffset::from_addr(&*ufo_lock, ptr);
 
-            let chunk = core.populate_impl(ufo, &*ufo_lock, offset)
-            .expect("error during populate");
-            let mut chunk = chunk
-                .write()
-                .expect("chunk lock broken");
-
-            unsafe { memcpy(ptr, data_to_write_back, stride) };
-
-            chunk.dirty = true;
+            core.populate_impl(ufo, &*ufo_lock, offset,
+                |l| l.write().unwrap(),
+            |chunk| {
+                unsafe { memcpy(ptr, data_to_write_back, stride) };
+                chunk.dirty = true;
+            }).expect("error during write");
 
             Some(0)
         })
