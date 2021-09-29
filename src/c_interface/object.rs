@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::sync::LockResult;
 use std::sync::RwLock;
 use std::sync::RwLockWriteGuard;
@@ -98,8 +99,7 @@ impl Borough {
             let ptr: *const libc::c_void = unsafe { ufo_lock.body_ptr().add(idx * stride) };
             let offset = UfoOffset::from_addr(&*ufo_lock, ptr);
 
-            core.populate_impl(ufo, &*ufo_lock, offset,
-                |l| l.read().unwrap(),
+            core.populate_for_read(ufo, &*ufo_lock, offset,
                 |_chunk| {
                     unsafe { memcpy(writeout, ptr, stride) };
                 }).expect("error during read");
@@ -108,10 +108,6 @@ impl Borough {
         })
         .unwrap_or(None)
         .unwrap_or(-1)
-    }
-
-    fn wlock<'a>(l: &'a ChunkArcLock) -> RwLockWriteGuard<'a, UfoChunk>{
-        l.write().unwrap()
     }
 
     #[no_mangle]
@@ -129,8 +125,7 @@ impl Borough {
             let ptr = unsafe { ufo_lock.body_ptr().add(idx * stride) };
             let offset = UfoOffset::from_addr(&*ufo_lock, ptr);
 
-            core.populate_impl(ufo, &*ufo_lock, offset,
-                |l| l.write().unwrap(),
+            core.populate_for_write(ufo, &*ufo_lock, offset,
             |chunk| {
                 unsafe { memcpy(ptr, data_to_write_back, stride) };
                 chunk.dirty = true;
