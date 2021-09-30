@@ -4,6 +4,7 @@
 
 !*.md
 
+!*.c
 !*.rs
 !Cargo.toml
 

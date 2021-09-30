@@ -258,19 +258,19 @@ impl UfoCore {
     where
         C: FnOnce(&RwLockReadGuard<UfoChunk>),
     {
+        let table_lock = ufo
+            .loaded_chunks
+            .read()?;
+        if let Some(existing_chunk) = table_lock
+            .get(&UfoChunkIdx(fault_offset.chunk_number()))
         {
-            let table_lock = ufo
-                .loaded_chunks
-                .read()?;
-            if let Some(existing_chunk) = table_lock
-                .get(&UfoChunkIdx(fault_offset.chunk_number()))
-            {
-                let locked_chunk = existing_chunk.read().unwrap();
-                assert!(locked_chunk.size() > 0, "freed chunk witnessed");
-                lock_consumer(&locked_chunk);
-                return Ok(());
-            }
+            let locked_chunk = existing_chunk.read().unwrap();
+            assert!(locked_chunk.size() > 0, "freed chunk witnessed");
+            lock_consumer(&locked_chunk);
+            return Ok(());
         }
+
+        std::mem::drop(table_lock);
 
         let mut state = self.get_locked_state().unwrap();
 
@@ -356,19 +356,19 @@ impl UfoCore {
     where
         C: FnOnce(&mut RwLockWriteGuard<UfoChunk>),
     {
+        let table_lock = ufo
+            .loaded_chunks
+            .read()?;
+        if let Some(existing_chunk) = table_lock
+            .get(&UfoChunkIdx(fault_offset.chunk_number()))
         {
-            let table_lock = ufo
-                .loaded_chunks
-                .read()?;
-            if let Some(existing_chunk) = table_lock
-                .get(&UfoChunkIdx(fault_offset.chunk_number()))
-            {
-                let mut locked_chunk = existing_chunk.write().unwrap();
-                assert!(locked_chunk.size() > 0, "freed chunk witnessed");
-                lock_consumer(&mut locked_chunk);
-                return Ok(());
-            }
+            let mut locked_chunk = existing_chunk.write().unwrap();
+            assert!(locked_chunk.size() > 0, "freed chunk witnessed");
+            lock_consumer(&mut locked_chunk);
+            return Ok(());
         }
+
+        std::mem::drop(table_lock);
 
         let mut state = self.get_locked_state().unwrap();
 

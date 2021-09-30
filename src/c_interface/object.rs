@@ -1,8 +1,3 @@
-use std::marker::PhantomData;
-use std::sync::LockResult;
-use std::sync::RwLock;
-use std::sync::RwLockWriteGuard;
-
 use libc::c_void;
 use libc::memcpy;
 
