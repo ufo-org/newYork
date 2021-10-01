@@ -83,7 +83,7 @@ impl NycCore {
                 element_ct: prototype.element_ct,
                 min_load_ct: Some(prototype.min_load_ct).filter(|x| *x > 0),
                 populate: Box::new(populate),
-                associated_data: Box::into_raw(assoc_dat).cast(),
+                associated_data: assoc_dat,
             };
 
             self.deref()
