@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use libc::c_void;
 use libc::memcpy;
 
@@ -28,6 +30,8 @@ impl Borough {
 
                 let core = ufo_lock.core.upgrade();
                 if let Some(core) = core {
+                    let core = Arc::clone(&core);
+                    std::mem::drop(ufo_lock);
                     core.free(ufo).expect("error while freeing");
                 }
 

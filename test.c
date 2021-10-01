@@ -71,5 +71,7 @@ void main(){
         exit(-6);
     }
 
+    borough_free(b);
+
     nyc_shutdown(core);
 }
