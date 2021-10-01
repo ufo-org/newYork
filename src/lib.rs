@@ -16,6 +16,7 @@ mod errors;
 mod math;
 mod mmap_wrapers;
 mod once_await;
+mod ptr_hiding;
 mod return_checks;
 mod ufo_core;
 mod ufo_objects;

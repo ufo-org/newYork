@@ -1,6 +1,7 @@
 use libc::c_void;
 use libc::memcpy;
 
+use crate::ptr_hiding;
 use crate::ufo_core::*;
 use crate::ufo_objects::*;
 
@@ -15,7 +16,7 @@ pub struct Borough {
 
 opaque_c_type!(Borough, WrappedUfoObject);
 
-type AssocData = Box<(BoroughPopulateCallout, BoroughPopulateData)>;
+type AssocData = (BoroughPopulateCallout, BoroughPopulateData);
 
 impl Borough {
     #[no_mangle]
@@ -34,9 +35,7 @@ impl Borough {
 
                 // only free this once the ufo is dropped
                 // Not needed for correctness but to guard against anyone else trying to access it
-                unsafe {
-                    Box::from_raw(assoc.cast::<AssocData>());
-                }
+                ptr_hiding::free_c_void::<AssocData>(assoc);
             }
         })
         .unwrap_or(())
@@ -65,7 +64,8 @@ impl Borough {
     pub extern "C" fn borough_params(&self, params_ptr: *mut BoroughParameters) {
         std::panic::catch_unwind(|| {
             let ufo = self.deref()?.read().ok()?;
-            let assoc_data: &AssocData = unsafe { &*ufo.config.associated_data().cast() };
+            let assoc_ptr = &ufo.config.associated_data();
+            let assoc_data: &AssocData = ptr_hiding::as_ref::<AssocData>(assoc_ptr);
 
             let config = &ufo.config;
             let params: &mut BoroughParameters = unsafe { &mut *params_ptr.cast() };
@@ -94,10 +94,10 @@ impl Borough {
             let ptr: *const libc::c_void = unsafe { ufo_lock.body_ptr().add(idx * stride) };
             let offset = UfoOffset::from_addr(&*ufo_lock, ptr);
 
-            core.populate_for_read(ufo, &*ufo_lock, offset,
-                |_chunk| {
-                    unsafe { memcpy(writeout, ptr, stride) };
-                }).expect("error during read");
+            core.populate_for_read(ufo, &*ufo_lock, offset, |_chunk| {
+                unsafe { memcpy(writeout, ptr, stride) };
+            })
+            .expect("error during read");
 
             Some(0)
         })
@@ -120,11 +120,11 @@ impl Borough {
             let ptr = unsafe { ufo_lock.body_ptr().add(idx * stride) };
             let offset = UfoOffset::from_addr(&*ufo_lock, ptr);
 
-            core.populate_for_write(ufo, &*ufo_lock, offset,
-            |chunk| {
+            core.populate_for_write(ufo, &*ufo_lock, offset, |chunk| {
                 unsafe { memcpy(ptr, data_to_write_back, stride) };
                 chunk.dirty = true;
-            }).expect("error during write");
+            })
+            .expect("error during write");
 
             Some(0)
         })

@@ -2,6 +2,7 @@ use libc::c_void;
 use std::sync::Arc;
 
 use crate::errors::*;
+use crate::ptr_hiding;
 use crate::ufo_core;
 use crate::ufo_core::*;
 use crate::ufo_objects::*;
@@ -74,8 +75,7 @@ impl NycCore {
                 }
             };
 
-            let assoc_dat:Box<(BoroughPopulateCallout, BoroughPopulateData)>  // /
-                = Box::new((prototype.populate_fn, prototype.populate_data));
+            let assoc_dat = ptr_hiding::as_c_void((prototype.populate_fn, prototype.populate_data));
 
             let params = UfoObjectParams {
                 header_size: prototype.header_size,

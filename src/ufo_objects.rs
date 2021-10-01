@@ -402,14 +402,12 @@ impl UfoChunk {
         self.length = None;
     }
 
-    pub fn ufo_id(&self ) -> UfoId {
+    pub fn ufo_id(&self) -> UfoId {
         self.ufo_id
     }
 
     pub fn size(&self) -> usize {
-        self.length
-            .map(NonZeroUsize::get)
-            .unwrap_or(0)
+        self.length.map(NonZeroUsize::get).unwrap_or(0)
     }
 
     fn my_size(&self) -> usize {
